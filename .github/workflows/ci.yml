@@ -17,8 +17,8 @@ env:
   GITOPS_BRANCH: t3
 
 jobs:
-  ci:
-    name: Test, scan and publish
+  build:
+    name: Build, test and lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -39,6 +39,18 @@ jobs:
         with:
           version: latest
 
+  scan:
+    name: Security scans
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: SCA dependency scan
         continue-on-error: true
         uses: golang/govulncheck-action@v1
@@ -57,6 +69,13 @@ jobs:
           severity: CRITICAL
           exit-code: "1"
           ignore-unfixed: false
+
+  publish:
+    name: Build and publish image
+    needs: [build, scan]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         if: github.event_name == 'push'
@@ -120,4 +139,18 @@ jobs:
           git add k8s/app/${{ env.SERVICE_NAME }}/deployment.yaml
           git diff --cached --quiet && exit 0
           git commit -m "chore(gitops): update ${{ env.SERVICE_NAME }} image to ${{ github.sha }}"
-          for i in 1 2 3 4 5; do git pull --rebase origin ${{ env.GITOPS_BRANCH }} && git push origin HEAD:${{ env.GITOPS_BRANCH }} && break || sleep 10; done
+          success=false
+          for _ in 1 2 3 4 5; do
+            git rebase --abort || true
+            if git pull --rebase origin ${{ env.GITOPS_BRANCH }}; then
+              if git push origin HEAD:${{ env.GITOPS_BRANCH }}; then
+                success=true
+                break
+              fi
+            fi
+            sleep 10
+          done
+          if [ "$success" != "true" ]; then
+            echo "GitOps push failed after retries"
+            exit 1
+          fi
